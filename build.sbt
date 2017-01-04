@@ -18,8 +18,6 @@ lazy val dataMacro = project.settings(
   // A dependency on scala.meta is required to write new-style macros, but not
   // to expand such macros.  This is similar to how it works for old-style
   // macros and a dependency on scala.reflect.
-  libraryDependencies += "org.scalameta" %% "scalameta" % "1.4.0"
+  libraryDependencies += "org.scalameta" %% "scalameta" % "1.4.0",
+  libraryDependencies += "org.scalatest" %% "scalatest" % "3.0.0" % "test"
 )
-
-// Use macros in this project.
-lazy val dataExample = project.settings(metaMacroSettings).dependsOn(dataMacro)
