@@ -58,7 +58,8 @@ object DataMacro {
     q"def unapply(that: $name): Option[$tupleTypes] = Some($tupleArgs)"
   }
 
-  private[dataMacro] def buildEquals(name: Type.Name, dataParams: Seq[DataParam], intern: Boolean): Defn.Def = {
+  private[dataMacro] def buildEquals(name: Type.Name, dataParams: Seq[DataParam],
+                                     intern: Boolean, idEqulas: Boolean): Defn.Def = {
     val eqs = dataParams.map(param => q"that.${Term.Name(param.name)} == this.${Term.Name(param.name)}")
     val eqsWithAnds = eqs match {
       case Seq(eq1) => eq1
@@ -67,6 +68,21 @@ object DataMacro {
 
     if (intern) {
       q"override def equals(thatAny: Any): Boolean = (this eq thatAny.asInstanceOf[Object])"
+    } else if (idEqulas) {
+      q"""override def equals(thatAny: Any): Boolean = (this eq thatAny.asInstanceOf[Object]) ||
+      (thatAny match {
+        case that: $name =>
+          val idTuple = if (this.id > that.id) (that.id, this.id) else (this.id, that.id)
+          val res = ${Term.Name(name.value)}.idEquals.get(idTuple)
+          if (res == null) {
+            val realEquals = $eqsWithAnds
+            ${Term.Name(name.value)}.idEquals.put(idTuple, Boolean.box(realEquals))
+            realEquals
+          } else {
+            Boolean.unbox(res)
+          }
+        case _ => false
+     })"""
     } else {
       q"""override def equals(thatAny: Any): Boolean = (this eq thatAny.asInstanceOf[Object]) ||
       (thatAny match {
@@ -137,17 +153,37 @@ object DataMacro {
   private[dataMacro] def buildIntern(name: Type.Name): Defn.Def = {
     q"def intern: $name = ${Term.Name(name.value)}.intern(this)"
   }
+
+  private[dataMacro] def buildIdGenerator(name: Type.Name): Seq[Defn.Val] = {
+    Seq(
+      q"private[$name] val idGenerator = new java.util.concurrent.atomic.AtomicInteger()",
+      q"private[$name] val idEquals = new java.util.concurrent.ConcurrentHashMap[(Int, Int), java.lang.Boolean]()"
+    )
+  }
+
+  private[dataMacro] def buildIdVal(name: Type.Name): Defn.Val = {
+    q"private[$name] val id: Int = ${Term.Name(name.value)}.idGenerator.incrementAndGet()"
+  }
 }
 
-class data(intern: Boolean) extends scala.annotation.StaticAnnotation {
+class data(intern: Boolean, idEquals: Boolean) extends scala.annotation.StaticAnnotation {
 
   inline def apply(defn: Any): Any = meta {
-    println(this.structure)
-    val intern = this match {
-      case q"new data(intern = ${Lit(b: Boolean)})" => b
-      case _ => false
+    //println(this.structure)
+    var intern: Boolean = false
+    var idEquals: Boolean = false
+    this match {
+      case q"new data(..$args)" => args.foreach {
+        case arg"intern = ${Lit(b: Boolean)}" => intern = b
+        case arg"idEquals = ${Lit(b: Boolean)}" => idEquals = b
+        case _ =>
+      }
+      case _ =>
     }
-    Term.New
+
+    if (intern && idEquals) {
+      abort("Can't do interning with id equations")
+    }
 
     defn match {
       case Term.Block(
@@ -159,20 +195,22 @@ class data(intern: Boolean) extends scala.annotation.StaticAnnotation {
         val dataParams = DataMacro.extractDataParams(ctor)
         val newClass: Stat = q"""class ${Type.Name(name.value)} (..${DataMacro.buildCtorParams(dataParams)})
                          extends Product with Serializable {
-          ${DataMacro.buildEquals(name, dataParams, intern)}
+          ${DataMacro.buildEquals(name, dataParams, intern, idEquals)}
           ${DataMacro.buildToString(name, dataParams)}
           ${DataMacro.buildHashCode(name, dataParams)}
           ${DataMacro.buildCopy(name, dataParams)}
           ..${DataMacro.buildProductMethods(name, dataParams)}
           ..${if (intern) Seq(DataMacro.buildIntern(name)) else Seq()}
+          ..${if (idEquals) Seq(DataMacro.buildIdVal(name)) else Seq()}
         }"""
         val newObject: Stat = q"""object ${Term.Name(name.value)} {
           ${DataMacro.buildApply(name, dataParams, intern)}
           ${DataMacro.buildUnapply(name, dataParams)}
           ..${if (intern) DataMacro.buildInternMap(name, dataParams) else Seq()}
+          ..${if (idEquals) DataMacro.buildIdGenerator(name) else Seq()}
         }"""
 
-        println((newClass, newObject).toString())
+        //println((newClass, newObject).toString())
 
         Term.Block(Seq(
           newClass,
