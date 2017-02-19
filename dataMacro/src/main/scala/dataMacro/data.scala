@@ -5,6 +5,7 @@ import scala.collection.immutable.Seq
 
 object DataMacro {
   private[dataMacro] case class DataParam(name: String, tpe: Type, default: Option[Term])
+  private[dataMacro] case class DataMods(intern: Boolean, idEquals: Boolean)
 
   private[dataMacro] def validateCtor(ctor: Ctor.Primary) {
     if (ctor.paramss.length > 1) {
@@ -58,17 +59,16 @@ object DataMacro {
     q"def unapply(that: $name): Option[$tupleTypes] = Some($tupleArgs)"
   }
 
-  private[dataMacro] def buildEquals(name: Type.Name, dataParams: Seq[DataParam],
-                                     intern: Boolean, idEqulas: Boolean): Defn.Def = {
+  private[dataMacro] def buildEquals(name: Type.Name, dataParams: Seq[DataParam], mods: DataMods): Defn.Def = {
     val eqs = dataParams.map(param => q"that.${Term.Name(param.name)} == this.${Term.Name(param.name)}")
     val eqsWithAnds = eqs match {
       case Seq(eq1) => eq1
       case Seq(eq1, rest @ _ *) => rest.foldLeft(eq1)((acc, eq) => q"$acc && $eq")
     }
 
-    if (intern) {
+    if (mods.intern) {
       q"override def equals(thatAny: Any): Boolean = (this eq thatAny.asInstanceOf[Object])"
-    } else if (idEqulas) {
+    } else if (mods.idEquals) {
       q"""override def equals(thatAny: Any): Boolean = (this eq thatAny.asInstanceOf[Object]) ||
       (thatAny match {
         case that: $name =>
@@ -126,7 +126,7 @@ object DataMacro {
   }
 
   private[dataMacro] def buildInternMap(name: Type.Name, dataParams: Seq[DataParam]): Seq[Stat] = {
-    val wrapperName = Type.fresh(name.value + "Wrapper")
+    val wrapperName = Term.Name(name.value + "Wrapper")
     val eqs = dataParams.map(param => q"that.cl.${Term.Name(param.name)} == this.cl.${Term.Name(param.name)}")
     val eqsWithAnds = eqs match {
       case Seq(eq1) => eq1
@@ -164,6 +164,41 @@ object DataMacro {
   private[dataMacro] def buildIdVal(name: Type.Name): Defn.Val = {
     q"private[$name] val id: Int = ${Term.Name(name.value)}.idGenerator.incrementAndGet()"
   }
+
+  private [dataMacro] def getUsedNames(stats: Seq[Stat]): Seq[String] = {
+    stats.flatMap {
+      case q"..$_ val ..$names: $_ = $_" => names.map(name => name.name.value)
+      case q"..$_ var ..$names: $_ = $_" => names.map(name => name.name.value)
+      case q"..$_ def $name[..$_](...$_): $_ = $_" => Seq(name.value)
+      case q"..$_ type $tname[..$_] = $_" => Seq(tname.value)
+      case q"..$_ class $tname[..$_] ..$_ (...$_) extends $_" => Seq(tname.value)
+      case q"..$_ trait $tname[..$_] extends $_" => Seq(tname.value)
+      case q"..$_ object $name extends $_" => Seq(name.value)
+      case q"..$_ val ..$names: $_" => names.map(name => name.name.value)
+      case q"..$_ var ..$names: $_" => names.map(name => name.name.value)
+      case q"..$_ def $name[..$_](...$_): $tpe" => Seq(name.value)
+      case q"..$_ type $tname[..$_] >: $_ <: $_" => Seq(tname.value)
+      case _ => Seq()
+    }
+  }
+
+  private [dataMacro] def validateUsedNames(names: Seq[String], dataMods: DataMods) {
+    val methodAbort = (method: String) => abort(s"""Data class shouldn't contain "$method" method""")
+    names.foreach {
+      case "apply" => methodAbort("apply")
+      case "unapply" => methodAbort("unapply")
+      case "productArity" => methodAbort("productArity")
+      case "productElement" => methodAbort("productElement")
+      case "productPrefix" => methodAbort("productPrefix")
+      case "productIterator" => methodAbort("productIterator")
+      case "copy" => methodAbort("copy")
+
+      case "equals" if dataMods.idEquals || dataMods.intern =>
+        abort(s"""Data class shouldn't contain "equals" method with modificators""")
+      case "equals" if dataMods.idEquals || dataMods.intern =>
+        abort(s"""Data class shouldn't contain "equals" method with modificators""")
+    }
+  }
 }
 
 class data(intern: Boolean, idEquals: Boolean) extends scala.annotation.StaticAnnotation {
@@ -187,11 +222,12 @@ class data(intern: Boolean, idEquals: Boolean) extends scala.annotation.StaticAn
 
     defn match {
       case Term.Block(
-        Seq(cls@Defn.Class(_, name, _, ctor, _),
+        Seq(cls@Defn.Class(Seq(), name, Seq(), ctor, tmpl),
         companion: Defn.Object)
       ) =>
         abort("@data block")
-      case cls@Defn.Class(_, name, _, ctor, _) =>
+      case cls@Defn.Class(Seq(), name, Seq(), ctor, tmpl) =>
+        tmpl.stats
         val dataParams = DataMacro.extractDataParams(ctor)
         val newClass: Stat = q"""class ${Type.Name(name.value)} (..${DataMacro.buildCtorParams(dataParams)})
                          extends Product with Serializable {
@@ -217,7 +253,7 @@ class data(intern: Boolean, idEquals: Boolean) extends scala.annotation.StaticAn
           newObject
         ))
       case _ =>
-        abort("@data must annotate a class.")
+        abort("@data must annotate a class without modificators and type parameters.")
     }
   }
 }
